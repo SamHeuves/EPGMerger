@@ -11,12 +11,15 @@ if ! command -v docker &> /dev/null; then
     rm get-docker.sh
 fi
 
-# Check if Docker Compose is installed
-if ! command -v docker-compose &> /dev/null; then
+# Check if Docker Compose is installed (plugin version)
+if ! docker compose version &> /dev/null; then
     echo "❌ Docker Compose is not installed. Installing Docker Compose..."
     apt-get update
     apt-get install -y docker-compose-plugin
 fi
+
+# Use docker compose (with space) - new plugin version
+DOCKER_COMPOSE="docker compose"
 
 # Pull latest changes
 echo "📥 Pulling latest changes from GitHub..."
@@ -24,11 +27,11 @@ git pull origin main
 
 # Stop existing containers
 echo "🛑 Stopping existing containers..."
-docker-compose -f docker-compose.prod.yml down || true
+$DOCKER_COMPOSE -f docker-compose.prod.yml down || true
 
 # Build and start containers
 echo "🔨 Building and starting containers..."
-docker-compose -f docker-compose.prod.yml up --build -d
+$DOCKER_COMPOSE -f docker-compose.prod.yml up --build -d
 
 # Wait for container to be healthy
 echo "⏳ Waiting for container to be healthy..."
@@ -36,14 +39,14 @@ sleep 10
 
 # Show status
 echo "📊 Container status:"
-docker-compose -f docker-compose.prod.yml ps
+$DOCKER_COMPOSE -f docker-compose.prod.yml ps
 
 # Show logs
 echo "📝 Recent logs:"
-docker-compose -f docker-compose.prod.yml logs --tail=20
+$DOCKER_COMPOSE -f docker-compose.prod.yml logs --tail=20
 
 # Get container IP
-CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' epg-merger 2>/dev/null || echo "localhost")
+CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' epg-merger-prod 2>/dev/null || echo "localhost")
 
 echo ""
 echo "✅ Deployment complete!"
@@ -55,7 +58,7 @@ echo ""
 echo "📡 EPG URLs will be:"
 echo "   http://$(hostname -I | awk '{print $1}'):5000/api/epg-files/[EPG_ID]/download"
 echo ""
-echo "📊 View logs: docker-compose -f docker-compose.prod.yml logs -f"
-echo "🛑 Stop: docker-compose -f docker-compose.prod.yml down"
-echo "🔄 Restart: docker-compose -f docker-compose.prod.yml restart"
+echo "📊 View logs: docker compose -f docker-compose.prod.yml logs -f"
+echo "🛑 Stop: docker compose -f docker-compose.prod.yml down"
+echo "🔄 Restart: docker compose -f docker-compose.prod.yml restart"
 
