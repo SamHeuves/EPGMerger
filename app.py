@@ -7,6 +7,8 @@ import os
 import json
 import gzip
 from pathlib import Path
+import threading
+import time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'epg-merger-secret-key'
@@ -21,6 +23,22 @@ EPG_FILES_DIR.mkdir(exist_ok=True)
 # Initialize scheduler
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+# Global job status tracking
+job_status = {
+    'is_running': False,
+    'current_step': '',
+    'progress': 0,
+    'total_steps': 0,
+    'current_epg_file': '',
+    'current_source': '',
+    'sources_completed': 0,
+    'total_sources': 0,
+    'start_time': None,
+    'end_time': None,
+    'error': None
+}
+job_status_lock = threading.Lock()
 
 
 def load_config():
@@ -74,6 +92,34 @@ def fetch_xml(url):
         return None
 
 
+def update_source_last_fetched(source_id):
+    """Update the last_fetched timestamp for a source"""
+    config = load_config()
+    sources = config.get('sources', [])
+    
+    for source in sources:
+        if source.get('id') == source_id:
+            source['last_fetched'] = datetime.now().isoformat()
+            break
+    
+    config['sources'] = sources
+    save_config(config)
+
+
+def update_job_status(**kwargs):
+    """Update job status with thread safety"""
+    with job_status_lock:
+        for key, value in kwargs.items():
+            if key in job_status:
+                job_status[key] = value
+
+
+def get_job_status():
+    """Get current job status"""
+    with job_status_lock:
+        return job_status.copy()
+
+
 def merge_epg_file(epg_file_id):
     """
     Merge EPG XML files for a specific EPG file.
@@ -98,7 +144,16 @@ def merge_epg_file(epg_file_id):
         print(f"No sources selected for EPG file {epg_file.get('name', epg_file_id)}")
         return False
     
-    print(f"Starting EPG merge for '{epg_file.get('name')}' at {datetime.now()} - Fetching fresh data from {len(selected_sources)} sources")
+    epg_name = epg_file.get('name', epg_file_id)
+    print(f"Starting EPG merge for '{epg_name}' at {datetime.now()} - Fetching fresh data from {len(selected_sources)} sources")
+    
+    # Update job status
+    update_job_status(
+        current_epg_file=epg_name,
+        current_step=f"Starting merge for '{epg_name}'",
+        total_sources=len(selected_sources),
+        sources_completed=0
+    )
     
     # Create root element
     root = ET.Element('tv')
@@ -123,11 +178,33 @@ def merge_epg_file(epg_file_id):
             continue
             
         url = source.get('url')
+        source_name = source.get('name', 'Unnamed Source')
+        
+        # Update job status for current source
+        update_job_status(
+            current_source=source_name,
+            current_step=f"Downloading from {source_name}",
+            sources_completed=job_status['sources_completed']
+        )
+        
         print(f"Fetching from {url}")
         xml_root = fetch_xml(url)
         
         if xml_root is None:
+            update_job_status(
+                current_step=f"Failed to fetch from {source_name}",
+                sources_completed=job_status['sources_completed'] + 1
+            )
             continue
+        
+        # Update the last_fetched timestamp for this source
+        update_source_last_fetched(source_id)
+        
+        # Update job status after successful fetch
+        update_job_status(
+            current_step=f"Processing data from {source_name}",
+            sources_completed=job_status['sources_completed'] + 1
+        )
         
         # Extract channels (avoid duplicates)
         for channel in xml_root.findall('channel'):
@@ -147,13 +224,23 @@ def merge_epg_file(epg_file_id):
     for programme in programmes:
         root.append(programme)
     
+    # Update job status for merging
+    update_job_status(
+        current_step=f"Merging data for '{epg_name}'"
+    )
+    
     # Create XML tree and write to file
     output_file = EPG_FILES_DIR / f"{epg_file_id}.xml"
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
     tree.write(output_file, encoding='utf-8', xml_declaration=True)
     
-    print(f"EPG merge completed for '{epg_file.get('name')}'. Total channels: {len(channels)}, Total programmes: {len(programmes)}")
+    # Update job status for completion
+    update_job_status(
+        current_step=f"Completed '{epg_name}' - {len(channels)} channels, {len(programmes)} programmes"
+    )
+    
+    print(f"EPG merge completed for '{epg_name}'. Total channels: {len(channels)}, Total programmes: {len(programmes)}")
     return True
 
 
@@ -164,12 +251,42 @@ def merge_all_epg_files():
     
     if not epg_files:
         print("No EPG files configured")
+        update_job_status(
+            is_running=False,
+            current_step="No EPG files configured",
+            error="No EPG files configured"
+        )
         return False
     
+    # Initialize job status
+    update_job_status(
+        is_running=True,
+        current_step="Starting EPG merge job",
+        progress=0,
+        total_steps=len(epg_files),
+        start_time=datetime.now().isoformat(),
+        end_time=None,
+        error=None
+    )
+    
     success_count = 0
-    for epg_file in epg_files:
+    for i, epg_file in enumerate(epg_files):
+        epg_name = epg_file.get('name', epg_file.get('id'))
+        update_job_status(
+            progress=i,
+            current_step=f"Processing EPG file {i+1}/{len(epg_files)}: {epg_name}"
+        )
+        
         if merge_epg_file(epg_file.get('id')):
             success_count += 1
+    
+    # Final job status
+    update_job_status(
+        is_running=False,
+        current_step=f"Job completed - {success_count}/{len(epg_files)} EPG files processed",
+        progress=len(epg_files),
+        end_time=datetime.now().isoformat()
+    )
     
     print(f"Completed merging {success_count}/{len(epg_files)} EPG files")
     return success_count > 0
@@ -404,7 +521,25 @@ def delete_epg_file(epg_id):
 @app.route('/api/epg-files/<epg_id>/merge', methods=['POST'])
 def merge_single_epg_file(epg_id):
     """Manually trigger merge for a specific EPG file"""
+    # Initialize job status for single file merge
+    update_job_status(
+        is_running=True,
+        current_step=f"Starting merge for EPG file {epg_id}",
+        progress=0,
+        total_steps=1,
+        start_time=datetime.now().isoformat(),
+        end_time=None,
+        error=None
+    )
+    
     success = merge_epg_file(epg_id)
+    
+    # Update final status
+    update_job_status(
+        is_running=False,
+        end_time=datetime.now().isoformat()
+    )
+    
     if success:
         return jsonify({'success': True, 'message': 'EPG file merged successfully'})
     else:
@@ -485,6 +620,31 @@ def get_version():
     })
 
 
+@app.route('/api/job-status', methods=['GET'])
+def get_job_status_api():
+    """Get current job status"""
+    status = get_job_status()
+    
+    # Calculate progress percentage
+    if status['total_steps'] > 0:
+        status['progress_percentage'] = int((status['progress'] / status['total_steps']) * 100)
+    else:
+        status['progress_percentage'] = 0
+    
+    # Calculate elapsed time
+    if status['start_time']:
+        start_time = datetime.fromisoformat(status['start_time'])
+        if status['end_time']:
+            end_time = datetime.fromisoformat(status['end_time'])
+            status['elapsed_time'] = str(end_time - start_time)
+        else:
+            status['elapsed_time'] = str(datetime.now() - start_time)
+    else:
+        status['elapsed_time'] = None
+    
+    return jsonify(status)
+
+
 # Legacy download route for backward compatibility
 @app.route('/download')
 def download_epg():
@@ -530,6 +690,9 @@ def test_source(source_id):
                 'channels': 0,
                 'programmes': 0
             })
+        
+        # Update the last_fetched timestamp for this source
+        update_source_last_fetched(source_id)
         
         channels = xml_root.findall('channel')
         programmes = xml_root.findall('programme')

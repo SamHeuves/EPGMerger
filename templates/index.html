@@ -505,6 +505,76 @@
         border-radius: 50%;
         animation: spin 1s linear infinite;
       }
+
+      /* Job Progress Styles */
+      .progress-container {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 20px;
+      }
+
+      .progress-bar {
+        flex: 1;
+        height: 20px;
+        background: #e9ecef;
+        border-radius: 10px;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 10px;
+        transition: width 0.3s ease;
+        width: 0%;
+      }
+
+      .progress-text {
+        font-weight: bold;
+        color: #667eea;
+        min-width: 40px;
+        text-align: right;
+      }
+
+      .job-status {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+        border: 1px solid #e9ecef;
+      }
+
+      .status-step {
+        font-size: 1.1em;
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 10px;
+      }
+
+      .status-details {
+        font-size: 0.9em;
+        color: #666;
+        margin-bottom: 8px;
+      }
+
+      .status-time {
+        font-size: 0.8em;
+        color: #888;
+        font-family: monospace;
+      }
+
+      .job-running {
+        border-left: 4px solid #28a745;
+      }
+
+      .job-completed {
+        border-left: 4px solid #17a2b8;
+      }
+
+      .job-error {
+        border-left: 4px solid #dc3545;
+      }
     </style>
   </head>
   <body>
@@ -642,6 +712,24 @@
         </div>
       </div>
 
+      <!-- Job Progress Section -->
+      <div class="card" id="jobProgressCard" style="display: none">
+        <h2>🔄 Job Progress</h2>
+        <div id="jobProgressContent">
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">0%</div>
+          </div>
+          <div class="job-status">
+            <div class="status-step" id="currentStep">Ready to start...</div>
+            <div class="status-details" id="statusDetails"></div>
+            <div class="status-time" id="statusTime"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Configuration Section -->
       <div class="card">
         <h2>⚙️ Configuration</h2>
@@ -692,6 +780,14 @@
                   {{ source.name or 'Unnamed Source' }}
                 </div>
                 <div class="source-url">{{ source.url }}</div>
+                {% if source.last_fetched %}
+                <div
+                  class="source-last-fetched"
+                  style="font-size: 0.8em; color: #888; margin-top: 3px"
+                >
+                  Last updated: {{ source.last_fetched[:19].replace('T', ' ') }}
+                </div>
+                {% endif %}
                 <div
                   id="stats-{{ source.id }}"
                   class="source-stats"
@@ -789,6 +885,7 @@
     <script>
       let currentEPGId = null;
       let currentEPGName = null;
+      let progressInterval = null;
 
       function showAlert(message, type = "success") {
         const alertContainer = document.getElementById("alertContainer");
@@ -822,6 +919,102 @@
             button.classList.remove("button-loading");
             button.disabled = false;
           }
+        }
+      }
+
+      // Job Progress Functions
+      function showJobProgress() {
+        document.getElementById("jobProgressCard").style.display = "block";
+        startProgressPolling();
+      }
+
+      function hideJobProgress() {
+        document.getElementById("jobProgressCard").style.display = "none";
+        stopProgressPolling();
+      }
+
+      function startProgressPolling() {
+        if (progressInterval) {
+          clearInterval(progressInterval);
+        }
+        progressInterval = setInterval(updateJobProgress, 1000); // Poll every second
+      }
+
+      function stopProgressPolling() {
+        if (progressInterval) {
+          clearInterval(progressInterval);
+          progressInterval = null;
+        }
+      }
+
+      async function updateJobProgress() {
+        try {
+          const response = await fetch("/api/job-status");
+          const status = await response.json();
+
+          updateProgressUI(status);
+
+          // Stop polling if job is not running
+          if (!status.is_running && status.end_time) {
+            setTimeout(() => {
+              stopProgressPolling();
+            }, 3000); // Keep showing for 3 more seconds
+          }
+        } catch (error) {
+          console.error("Error fetching job status:", error);
+        }
+      }
+
+      function updateProgressUI(status) {
+        const progressFill = document.getElementById("progressFill");
+        const progressText = document.getElementById("progressText");
+        const currentStep = document.getElementById("currentStep");
+        const statusDetails = document.getElementById("statusDetails");
+        const statusTime = document.getElementById("statusTime");
+        const jobStatus = document.querySelector(".job-status");
+
+        // Update progress bar
+        const percentage = status.progress_percentage || 0;
+        progressFill.style.width = `${percentage}%`;
+        progressText.textContent = `${percentage}%`;
+
+        // Update current step
+        currentStep.textContent = status.current_step || "Ready to start...";
+
+        // Update status details
+        let details = "";
+        if (status.current_epg_file) {
+          details += `EPG File: ${status.current_epg_file}<br>`;
+        }
+        if (status.current_source) {
+          details += `Current Source: ${status.current_source}<br>`;
+        }
+        if (
+          status.sources_completed !== undefined &&
+          status.total_sources !== undefined
+        ) {
+          details += `Sources: ${status.sources_completed}/${status.total_sources}<br>`;
+        }
+        if (status.total_steps > 0) {
+          details += `Overall Progress: ${status.progress}/${status.total_steps} EPG files`;
+        }
+        statusDetails.innerHTML = details;
+
+        // Update time
+        if (status.elapsed_time) {
+          statusTime.textContent = `Elapsed: ${status.elapsed_time}`;
+        } else {
+          statusTime.textContent = "";
+        }
+
+        // Update status styling
+        jobStatus.className = "job-status";
+        if (status.is_running) {
+          jobStatus.classList.add("job-running");
+        } else if (status.error) {
+          jobStatus.classList.add("job-error");
+        } else if (status.end_time) {
+          jobStatus.classList.add("job-completed");
         }
       }
 
@@ -918,7 +1111,7 @@
 
       async function mergeEPGFile(epgId, epgName) {
         setButtonLoading(`merge-btn-${epgId}`, true);
-        showLoading("Merging EPG File", `Merging "${epgName}"...`);
+        showJobProgress();
         showAlert("Merging EPG file...", "success");
 
         try {
@@ -946,7 +1139,7 @@
 
       async function triggerMergeAll() {
         setButtonLoading("merge-all-btn", true);
-        showLoading("Merging All EPG Files", "Processing all EPG files...");
+        showJobProgress();
         showAlert("Merging all EPG files...", "success");
 
         try {
@@ -964,7 +1157,6 @@
           showAlert("Error triggering merge", "error");
         } finally {
           setButtonLoading("merge-all-btn", false);
-          hideLoading();
         }
       }
 
@@ -1013,6 +1205,13 @@
               <label for="source-${source.id}">
                 <strong>${source.name || "Unnamed Source"}</strong><br>
                 <small style="color: #666;">${source.url}</small>
+                ${
+                  source.last_fetched
+                    ? `<br><small style="color: #888;">Last updated: ${source.last_fetched
+                        .substring(0, 19)
+                        .replace("T", " ")}</small>`
+                    : ""
+                }
               </label>
             `;
             checkboxList.appendChild(div);
@@ -1230,6 +1429,21 @@
           closeSourceModal();
         }
       };
+
+      // Check for running jobs on page load
+      window.addEventListener("load", async function () {
+        try {
+          const response = await fetch("/api/job-status");
+          const status = await response.json();
+
+          if (status.is_running) {
+            showJobProgress();
+            updateProgressUI(status);
+          }
+        } catch (error) {
+          console.error("Error checking job status:", error);
+        }
+      });
     </script>
   </body>
 </html>
